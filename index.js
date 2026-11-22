@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
+import { jwtVerify, createRemoteJWKSet } from 'jose'
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -10,7 +11,24 @@ const port = process.env.PORT || 5000;
 // Middlewares
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
-
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+  }
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+  }
+  const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    req.user = payload;
+    next();
+  } catch (error) {
+    return res.status(401).json({ success: false, error: error.message });
+  }
+};
 // DB connection
 const client = new MongoClient(process.env.MONGODB_URL);
 export async function connectToMongoDB() {
@@ -41,27 +59,30 @@ const findUser = async (query) => {
 // Admin authorization guard middleware
 const requireAdmin = async (req, res, next) => {
   try {
-    const userRole = req.headers["x-user-role"];
-    const userEmail = req.headers["x-user-email"];
+    const userRole = req.user?.role || req.headers["x-user-role"];
+    const userEmail = req.user?.email || req.headers["x-user-email"];
+    const userId = req.user?.sub || req.headers["x-user-id"];
 
-    if (userRole === "admin") {
-      if (userEmail) {
-        const user = await findUser({ email: userEmail });
-        if (user?.isBlocked) {
-          return res.status(403).json({
-            success: false,
-            error: "Forbidden: Account is suspended.",
-          });
-        }
-      }
-      return next();
+    let user = null;
+    if (userEmail) {
+      user = await findUser({ email: userEmail });
+    } else if (userId && ObjectId.isValid(userId)) {
+      user = await findUser({ _id: new ObjectId(userId) });
     }
 
-    if (userEmail) {
-      const user = await findUser({ email: userEmail });
-      if (user?.role === "admin" && !user.isBlocked) {
+    if (user) {
+      if (user.isBlocked) {
+        return res.status(403).json({
+          success: false,
+          error: "Forbidden: Account is suspended.",
+        });
+      }
+      if (user.role === "admin") {
+        req.currentUser = user;
         return next();
       }
+    } else if (userRole === "admin") {
+      return next();
     }
 
     return res.status(403).json({
@@ -77,39 +98,44 @@ const requireAdmin = async (req, res, next) => {
 // Rule: Only authenticated Customers can submit appointment requests. Admins cannot book customer appointments.
 const requireCustomer = async (req, res, next) => {
   try {
-    const userRole = req.headers["x-user-role"];
-    const userEmail = req.headers["x-user-email"];
+    const userRole = req.user?.role || req.headers["x-user-role"];
+    const userEmail = req.user?.email || req.headers["x-user-email"];
+    const userId = req.user?.sub || req.headers["x-user-id"];
 
-    if (!userEmail) {
+    let user = null;
+    if (userEmail) {
+      user = await findUser({ email: userEmail });
+    } else if (userId && ObjectId.isValid(userId)) {
+      user = await findUser({ _id: new ObjectId(userId) });
+    }
+
+    if (!user && !userEmail) {
       return res.status(401).json({
         success: false,
         error: "Unauthorized: Please sign in as a customer to perform this action.",
       });
     }
 
-    const user = await findUser({ email: userEmail });
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: "Unauthorized: User account not found.",
-      });
-    }
-
-    if (user.isBlocked) {
+    if (user?.isBlocked || req.user?.isBlocked) {
       return res.status(403).json({
         success: false,
         error: "Forbidden: Your account has been suspended.",
       });
     }
 
-    if (user.role === "admin" || userRole === "admin") {
+    if (user?.role === "admin" || userRole === "admin") {
       return res.status(403).json({
         success: false,
         error: "Forbidden: Administrators cannot book customer appointments. Please use a customer account.",
       });
     }
 
-    req.currentUser = user;
+    req.currentUser = user || {
+      _id: userId,
+      email: userEmail,
+      role: userRole || "customer",
+      name: req.user?.name || "Customer",
+    };
     return next();
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -234,8 +260,8 @@ const getSingleServiceHandler = async (req, res) => {
   }
 };
 
-app.get("/services/:id", getSingleServiceHandler);
-app.get("/api/services/:id", getSingleServiceHandler);
+app.get("/services/:id", verifyToken, getSingleServiceHandler);
+app.get("/api/services/:id", verifyToken, getSingleServiceHandler);
 
 // POST /services (or /api/services) - Admin Only
 const createServiceHandler = async (req, res) => {
@@ -291,8 +317,8 @@ const createServiceHandler = async (req, res) => {
   }
 };
 
-app.post("/services", requireAdmin, createServiceHandler);
-app.post("/api/services", requireAdmin, createServiceHandler);
+app.post("/services", verifyToken, requireAdmin, createServiceHandler);
+app.post("/api/services", verifyToken, requireAdmin, createServiceHandler);
 
 
 // PUT /services/:id (or /api/services/:id) - Admin Only
@@ -348,8 +374,8 @@ const updateServiceHandler = async (req, res) => {
   }
 };
 
-app.put("/services/:id", requireAdmin, updateServiceHandler);
-app.put("/api/services/:id", requireAdmin, updateServiceHandler);
+app.put("/services/:id", verifyToken, requireAdmin, updateServiceHandler);
+app.put("/api/services/:id", verifyToken, requireAdmin, updateServiceHandler);
 
 // PATCH /services/:id/status (or /api/services/:id/status) - Admin Only
 const toggleStatusHandler = async (req, res) => {
@@ -384,8 +410,8 @@ const toggleStatusHandler = async (req, res) => {
   }
 };
 
-app.patch("/services/:id/status", requireAdmin, toggleStatusHandler);
-app.patch("/api/services/:id/status", requireAdmin, toggleStatusHandler);
+app.patch("/services/:id/status", verifyToken, requireAdmin, toggleStatusHandler);
+app.patch("/api/services/:id/status", verifyToken, requireAdmin, toggleStatusHandler);
 
 // DELETE /services/:id (or /api/services/:id) - Admin Only
 const deleteServiceHandler = async (req, res) => {
@@ -406,8 +432,8 @@ const deleteServiceHandler = async (req, res) => {
   }
 };
 
-app.delete("/services/:id", requireAdmin, deleteServiceHandler);
-app.delete("/api/services/:id", requireAdmin, deleteServiceHandler);
+app.delete("/services/:id", verifyToken, requireAdmin, deleteServiceHandler);
+app.delete("/api/services/:id", verifyToken, requireAdmin, deleteServiceHandler);
 
 // ==========================================
 // APPOINTMENTS API
@@ -561,8 +587,8 @@ const createAppointmentHandler = async (req, res) => {
   }
 };
 
-app.post("/appointments", requireCustomer, createAppointmentHandler);
-app.post("/api/appointments", requireCustomer, createAppointmentHandler);
+app.post("/appointments", verifyToken, requireCustomer, createAppointmentHandler);
+app.post("/api/appointments", verifyToken, requireCustomer, createAppointmentHandler);
 
 // GET /appointments (or /api/appointments)
 // Query params: customerId, serviceId, status, date
@@ -571,8 +597,8 @@ const getAppointmentsHandler = async (req, res) => {
     const { customerId, serviceId, status, date } = req.query;
     const query = {};
 
-    const userRole = req.headers["x-user-role"];
-    const userEmail = req.headers["x-user-email"];
+    const userRole = req.user?.role || req.headers["x-user-role"];
+    const userEmail = req.user?.email || req.headers["x-user-email"];
 
     // If caller is customer, lock query to their customerId or email
     if (userRole !== "admin") {
@@ -610,8 +636,8 @@ const getAppointmentsHandler = async (req, res) => {
   }
 };
 
-app.get("/appointments", getAppointmentsHandler);
-app.get("/api/appointments", getAppointmentsHandler);
+app.get("/appointments", verifyToken, getAppointmentsHandler);
+app.get("/api/appointments", verifyToken, getAppointmentsHandler);
 
 
 
@@ -634,8 +660,8 @@ const getSingleAppointmentHandler = async (req, res) => {
   }
 };
 
-app.get("/appointments/:id", getSingleAppointmentHandler);
-app.get("/api/appointments/:id", getSingleAppointmentHandler);
+app.get("/appointments/:id", verifyToken, getSingleAppointmentHandler);
+app.get("/api/appointments/:id", verifyToken, getSingleAppointmentHandler);
 
 
 
@@ -659,8 +685,8 @@ const cancelAppointmentHandler = async (req, res) => {
       return res.status(400).json({ success: false, error: "This appointment is already cancelled." });
     }
 
-    const userRole = req.headers["x-user-role"];
-    const userEmail = req.headers["x-user-email"];
+    const userRole = req.user?.role || req.headers["x-user-role"];
+    const userEmail = req.user?.email || req.headers["x-user-email"];
 
     if (userRole === "admin") {
       // Admin can cancel pending or confirmed appointments
@@ -722,8 +748,8 @@ const cancelAppointmentHandler = async (req, res) => {
   }
 };
 
-app.patch("/appointments/:id/cancel", cancelAppointmentHandler);
-app.patch("/api/appointments/:id/cancel", cancelAppointmentHandler);
+app.patch("/appointments/:id/cancel", verifyToken, cancelAppointmentHandler);
+app.patch("/api/appointments/:id/cancel", verifyToken, cancelAppointmentHandler);
 
 
 
@@ -783,8 +809,8 @@ const updateAppointmentStatusHandler = async (req, res) => {
   }
 };
 
-app.patch("/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
-app.patch("/api/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
+app.patch("/appointments/:id/status", verifyToken, requireAdmin, updateAppointmentStatusHandler);
+app.patch("/api/appointments/:id/status", verifyToken, requireAdmin, updateAppointmentStatusHandler);
 
 // ==========================================
 // USER PROFILE API (CUSTOMERS & ADMINS)
@@ -793,8 +819,8 @@ app.patch("/api/appointments/:id/status", requireAdmin, updateAppointmentStatusH
 // GET /users/profile (or /api/users/profile)
 const getProfileHandler = async (req, res) => {
   try {
-    const userEmail = req.headers["x-user-email"];
-    const userId = req.headers["x-user-id"];
+    const userEmail = req.user?.email || req.headers["x-user-email"];
+    const userId = req.user?.sub || req.headers["x-user-id"];
 
     if (!userEmail && !userId) {
       return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
@@ -834,8 +860,8 @@ const getProfileHandler = async (req, res) => {
   }
 };
 
-app.get("/users/profile", getProfileHandler);
-app.get("/api/users/profile", getProfileHandler);
+app.get("/users/profile", verifyToken, getProfileHandler);
+app.get("/api/users/profile", verifyToken, getProfileHandler);
 
 // PATCH /users/profile (or /api/users/profile)
 // Rules:
@@ -844,8 +870,8 @@ app.get("/api/users/profile", getProfileHandler);
 // 3. Users must not be able to update another user's profile.
 const updateProfileHandler = async (req, res) => {
   try {
-    const userEmail = req.headers["x-user-email"];
-    const userId = req.headers["x-user-id"];
+    const userEmail = req.user?.email || req.headers["x-user-email"];
+    const userId = req.user?.sub || req.headers["x-user-id"];
 
     if (!userEmail && !userId) {
       return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
@@ -920,8 +946,8 @@ const updateProfileHandler = async (req, res) => {
   }
 };
 
-app.patch("/users/profile", updateProfileHandler);
-app.patch("/api/users/profile", updateProfileHandler);
+app.patch("/users/profile", verifyToken, updateProfileHandler);
+app.patch("/api/users/profile", verifyToken, updateProfileHandler);
 
 // ==========================================
 // ADMIN USER MANAGEMENT API
@@ -990,8 +1016,8 @@ const getUsersHandler = async (req, res) => {
   }
 };
 
-app.get("/users", requireAdmin, getUsersHandler);
-app.get("/api/users", requireAdmin, getUsersHandler);
+app.get("/users", verifyToken, requireAdmin, getUsersHandler);
+app.get("/api/users", verifyToken, requireAdmin, getUsersHandler);
 
 // GET /users/:id (or /api/users/:id) - Admin Only
 const getUserDetailsHandler = async (req, res) => {
@@ -1029,8 +1055,8 @@ const getUserDetailsHandler = async (req, res) => {
   }
 };
 
-app.get("/users/:id", requireAdmin, getUserDetailsHandler);
-app.get("/api/users/:id", requireAdmin, getUserDetailsHandler);
+app.get("/users/:id", verifyToken, requireAdmin, getUserDetailsHandler);
+app.get("/api/users/:id", verifyToken, requireAdmin, getUserDetailsHandler);
 
 // PATCH /users/:id/block (or /api/users/:id/block) - Admin Only
 // Block or Unblock User
@@ -1087,8 +1113,8 @@ const toggleBlockUserHandler = async (req, res) => {
   }
 };
 
-app.patch("/users/:id/block", requireAdmin, toggleBlockUserHandler);
-app.patch("/api/users/:id/block", requireAdmin, toggleBlockUserHandler);
+app.patch("/users/:id/block", verifyToken, requireAdmin, toggleBlockUserHandler);
+app.patch("/api/users/:id/block", verifyToken, requireAdmin, toggleBlockUserHandler);
 
 // -------------------------------------------------------------
 // TRANSACTIONS ROUTES
@@ -1127,10 +1153,10 @@ const getTransactionByIdHandler = async (req, res) => {
   }
 };
 
-app.get("/transactions", getTransactionsHandler);
-app.get("/api/transactions", getTransactionsHandler);
-app.get("/transactions/:id", getTransactionByIdHandler);
-app.get("/api/transactions/:id", getTransactionByIdHandler);
+app.get("/transactions", verifyToken, requireAdmin, getTransactionsHandler);
+app.get("/api/transactions", verifyToken, requireAdmin, getTransactionsHandler);
+app.get("/transactions/:id", verifyToken, requireAdmin, getTransactionByIdHandler);
+app.get("/api/transactions/:id", verifyToken, requireAdmin, getTransactionByIdHandler);
 
 // Start server
 app.listen(port, () => {
