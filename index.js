@@ -72,11 +72,35 @@ app.get("/", (req, res) => {
 // SERVICES API (PUBLIC & ADMIN)
 // ==========================================
 
+// GET /services/featured (or /api/services/featured)
+// Fetches 6 active featured services (supports ?limit=6)
+const getFeaturedServicesHandler = async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(24, Number(req.query.limit) || 6));
+    const services = await servicesCollection
+      .find({ status: "active" })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+
+    return res.json({
+      success: true,
+      count: services.length,
+      data: services,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/services/featured", getFeaturedServicesHandler);
+app.get("/api/services/featured", getFeaturedServicesHandler);
+
 // GET /services (or /api/services)
-// Query params: status (active | inactive | all), category, search, sort (price_asc, price_desc, duration_asc, duration_desc, newest)
+// Query params: status (active | inactive | all), category, search, limit, sort (price_asc, price_desc, duration_asc, duration_desc, name_asc, name_desc, newest)
 const getServicesHandler = async (req, res) => {
   try {
-    const { status, category, search, sort } = req.query;
+    const { status, category, search, sort, limit } = req.query;
     const query = {};
 
     // Filter by status:
@@ -101,7 +125,7 @@ const getServicesHandler = async (req, res) => {
 
     let cursor = servicesCollection.find(query);
 
-    // Sorting
+    // Sorting via API
     if (sort === "price_asc") {
       cursor = cursor.sort({ price: 1 });
     } else if (sort === "price_desc") {
@@ -110,14 +134,26 @@ const getServicesHandler = async (req, res) => {
       cursor = cursor.sort({ duration: 1 });
     } else if (sort === "duration_desc") {
       cursor = cursor.sort({ duration: -1 });
+    } else if (sort === "name_asc") {
+      cursor = cursor.sort({ serviceName: 1 });
+    } else if (sort === "name_desc") {
+      cursor = cursor.sort({ serviceName: -1 });
     } else if (sort === "newest") {
       cursor = cursor.sort({ createdAt: -1 });
     } else {
       cursor = cursor.sort({ createdAt: -1 });
     }
 
+    // Limit if specified
+    if (limit) {
+      const numLimit = Number(limit);
+      if (!isNaN(numLimit) && numLimit > 0) {
+        cursor = cursor.limit(numLimit);
+      }
+    }
+
     const services = await cursor.toArray();
-    return res.json({ success: true, data: services });
+    return res.json({ success: true, count: services.length, data: services });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
