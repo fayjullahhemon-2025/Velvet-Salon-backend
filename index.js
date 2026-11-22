@@ -204,6 +204,99 @@ const createServiceHandler = async (req, res) => {
 
 app.post("/services", requireAdmin, createServiceHandler);
 app.post("/api/services", requireAdmin, createServiceHandler);
+
+
+// PUT /services/:id (or /api/services/:id) - Admin Only
+const updateServiceHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid service ID" });
+    }
+
+    const { serviceName, category, description, price, duration, image, status } = req.body;
+    const updateDoc = { updatedAt: new Date() };
+
+    if (serviceName && serviceName.trim()) updateDoc.serviceName = serviceName.trim();
+    if (category && category.trim()) updateDoc.category = category.trim();
+    if (description && description.trim()) updateDoc.description = description.trim();
+    if (image && image.trim()) updateDoc.image = image.trim();
+    if (status === "active" || status === "inactive") updateDoc.status = status;
+
+    if (price !== undefined) {
+      const numPrice = Number(price);
+      if (isNaN(numPrice) || numPrice <= 0) {
+        return res.status(400).json({ success: false, error: "Price must be a positive number." });
+      }
+      updateDoc.price = numPrice;
+    }
+
+    if (duration !== undefined) {
+      const numDuration = Number(duration);
+      if (isNaN(numDuration) || numDuration <= 0) {
+        return res.status(400).json({ success: false, error: "Duration must be a positive number." });
+      }
+      updateDoc.duration = Math.round(numDuration);
+    }
+
+    const result = await servicesCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: updateDoc },
+      { returnDocument: "after" }
+    );
+
+    if (!result) {
+      return res.status(404).json({ success: false, error: "Service not found." });
+    }
+
+    return res.json({
+      success: true,
+      data: result,
+      message: "Service updated successfully.",
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.put("/services/:id", requireAdmin, updateServiceHandler);
+app.put("/api/services/:id", requireAdmin, updateServiceHandler);
+
+// PATCH /services/:id/status (or /api/services/:id/status) - Admin Only
+const toggleStatusHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid service ID" });
+    }
+
+    const { status } = req.body;
+    if (status !== "active" && status !== "inactive") {
+      return res.status(400).json({ success: false, error: "Status must be 'active' or 'inactive'." });
+    }
+
+    const result = await servicesCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    if (!result) {
+      return res.status(404).json({ success: false, error: "Service not found." });
+    }
+
+    return res.json({
+      success: true,
+      data: result,
+      message: `Service status updated to ${status}.`,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.patch("/services/:id/status", requireAdmin, toggleStatusHandler);
+app.patch("/api/services/:id/status", requireAdmin, toggleStatusHandler);
 // Start server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
