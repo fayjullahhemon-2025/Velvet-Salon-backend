@@ -635,6 +635,94 @@ const getSingleAppointmentHandler = async (req, res) => {
 
 app.get("/appointments/:id", getSingleAppointmentHandler);
 app.get("/api/appointments/:id", getSingleAppointmentHandler);
+
+
+
+// PATCH /appointments/:id/cancel (or /api/appointments/:id/cancel)
+// Rules:
+// - A customer can cancel only their own pending appointment requests.
+// - Admin can cancel pending or confirmed appointment requests.
+const cancelAppointmentHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid appointment ID" });
+    }
+
+    const appointment = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    if (!appointment) {
+      return res.status(404).json({ success: false, error: "Appointment not found." });
+    }
+
+    if (appointment.status === "cancelled") {
+      return res.status(400).json({ success: false, error: "This appointment is already cancelled." });
+    }
+
+    const userRole = req.headers["x-user-role"];
+    const userEmail = req.headers["x-user-email"];
+
+    if (userRole === "admin") {
+      // Admin can cancel pending or confirmed appointments
+      const updated = await appointmentsCollection.findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: { status: "cancelled", updatedAt: new Date() } },
+        { returnDocument: "after" }
+      );
+      return res.json({
+        success: true,
+        data: updated,
+        message: "Appointment cancelled successfully by admin.",
+      });
+    }
+
+    // Customer cancellation
+    if (!userEmail) {
+      return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+    }
+
+    const user = await findUser({ email: userEmail });
+    if (!user) {
+      return res.status(401).json({ success: false, error: "User not found." });
+    }
+
+    // Ownership check
+    const isOwner =
+      appointment.customerId === String(user._id) ||
+      appointment.customerEmail === user.email;
+
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: You can only cancel your own appointments.",
+      });
+    }
+
+    // Rule: Customer can cancel ONLY pending appointments
+    if (appointment.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        error: "You can only cancel pending appointment requests. Confirmed appointments cannot be cancelled online.",
+      });
+    }
+
+    const updated = await appointmentsCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status: "cancelled", updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    return res.json({
+      success: true,
+      data: updated,
+      message: "Your appointment request has been cancelled successfully.",
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.patch("/appointments/:id/cancel", cancelAppointmentHandler);
+app.patch("/api/appointments/:id/cancel", cancelAppointmentHandler);
 // Start server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
