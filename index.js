@@ -27,6 +27,15 @@ const db = connectedDB.db("Velvet-Saloon-DB");
 
 const servicesCollection = db.collection("services");
 const usersCollection = db.collection("user");
+const appointmentsCollection = db.collection("appointments");
+
+// Helper to look up user from either 'user' or 'users' collection
+const findUser = async (query) => {
+  return (
+    (await db.collection("user").findOne(query)) ||
+    (await db.collection("users").findOne(query))
+  );
+};
 
 // Admin authorization guard middleware
 const requireAdmin = async (req, res, next) => {
@@ -36,7 +45,7 @@ const requireAdmin = async (req, res, next) => {
 
     if (userRole === "admin") {
       if (userEmail) {
-        const user = await usersCollection.findOne({ email: userEmail });
+        const user = await findUser({ email: userEmail });
         if (user?.isBlocked) {
           return res.status(403).json({
             success: false,
@@ -48,7 +57,7 @@ const requireAdmin = async (req, res, next) => {
     }
 
     if (userEmail) {
-      const user = await usersCollection.findOne({ email: userEmail });
+      const user = await findUser({ email: userEmail });
       if (user?.role === "admin" && !user.isBlocked) {
         return next();
       }
@@ -58,6 +67,49 @@ const requireAdmin = async (req, res, next) => {
       success: false,
       error: "Forbidden: Admin access required.",
     });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// Customer authorization guard middleware
+// Rule: Only authenticated Customers can submit appointment requests. Admins cannot book customer appointments.
+const requireCustomer = async (req, res, next) => {
+  try {
+    const userRole = req.headers["x-user-role"];
+    const userEmail = req.headers["x-user-email"];
+
+    if (!userEmail) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized: Please sign in as a customer to perform this action.",
+      });
+    }
+
+    const user = await findUser({ email: userEmail });
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized: User account not found.",
+      });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: Your account has been suspended.",
+      });
+    }
+
+    if (user.role === "admin" || userRole === "admin") {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: Administrators cannot book customer appointments. Please use a customer account.",
+      });
+    }
+
+    req.currentUser = user;
+    return next();
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -355,6 +407,358 @@ const deleteServiceHandler = async (req, res) => {
 
 app.delete("/services/:id", requireAdmin, deleteServiceHandler);
 app.delete("/api/services/:id", requireAdmin, deleteServiceHandler);
+
+// ==========================================
+// APPOINTMENTS API
+// ==========================================
+
+// GET /appointments/booked-slots (or /api/appointments/booked-slots)
+// Query params: serviceId, date
+const getBookedSlotsHandler = async (req, res) => {
+  try {
+    const { serviceId, date } = req.query;
+    if (!serviceId || !date) {
+      return res.status(400).json({
+        success: false,
+        error: "serviceId and date query parameters are required.",
+      });
+    }
+
+    const bookedDocs = await appointmentsCollection
+      .find({
+        serviceId: String(serviceId),
+        appointmentDate: String(date),
+        status: { $in: ["pending", "confirmed"] },
+      })
+      .project({ timeSlot: 1 })
+      .toArray();
+
+    return res.json({
+      success: true,
+      bookedSlots: bookedDocs.map((d) => d.timeSlot),
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/appointments/booked-slots", getBookedSlotsHandler);
+app.get("/api/appointments/booked-slots", getBookedSlotsHandler);
+
+// POST /appointments (or /api/appointments)
+// Rules:
+// 1. Only authenticated Customers can submit appointment requests.
+// 2. Prevent customers from booking inactive services.
+// 3. Prevent duplicate active appointments for the same date and time slot.
+// 4. Default Appointment Status: Pending; Default Payment Status: Unpaid.
+const createAppointmentHandler = async (req, res) => {
+  try {
+    const { serviceId, appointmentDate, timeSlot, message } = req.body;
+
+    if (!serviceId || !ObjectId.isValid(serviceId)) {
+      return res.status(400).json({ success: false, error: "Valid service ID is required." });
+    }
+
+    // 1. Service validation
+    const service = await servicesCollection.findOne({ _id: new ObjectId(serviceId) });
+    if (!service) {
+      return res.status(404).json({ success: false, error: "Service not found." });
+    }
+
+    // Rule: Prevent customers from booking inactive services
+    if (service.status !== "active") {
+      return res.status(400).json({
+        success: false,
+        error: "This service is currently inactive and cannot be booked.",
+      });
+    }
+
+    // 2. Date validation
+    if (!appointmentDate || typeof appointmentDate !== "string") {
+      return res.status(400).json({ success: false, error: "Appointment date is required." });
+    }
+
+    const todayStr = new Date().toISOString().split("T")[0];
+    if (appointmentDate < todayStr) {
+      return res.status(400).json({
+        success: false,
+        error: "Appointment date cannot be in the past.",
+      });
+    }
+
+    // 3. Time slot validation
+    if (!timeSlot || typeof timeSlot !== "string" || !timeSlot.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Please select an available appointment time slot.",
+      });
+    }
+    const cleanSlot = timeSlot.trim();
+
+    // 4. Rule: Prevent duplicate active appointments for the same date and time slot
+    // Check if slot is already booked for this service
+    const existingServiceBooking = await appointmentsCollection.findOne({
+      serviceId: String(service._id),
+      appointmentDate,
+      timeSlot: cleanSlot,
+      status: { $in: ["pending", "confirmed"] },
+    });
+    if (existingServiceBooking) {
+      return res.status(409).json({
+        success: false,
+        error: "This time slot is already booked for this service. Please choose another time slot.",
+      });
+    }
+
+    // Check if this customer already has an active booking at the exact same date and time slot
+    const customerId = req.currentUser?._id
+      ? String(req.currentUser._id)
+      : req.headers["x-user-id"] || "";
+
+    if (customerId) {
+      const existingCustomerBooking = await appointmentsCollection.findOne({
+        customerId: String(customerId),
+        appointmentDate,
+        timeSlot: cleanSlot,
+        status: { $in: ["pending", "confirmed"] },
+      });
+      if (existingCustomerBooking) {
+        return res.status(409).json({
+          success: false,
+          error: "You already have an active appointment booked for this date and time slot.",
+        });
+      }
+    }
+
+    const newAppointment = {
+      serviceId: String(service._id),
+      customerId: String(customerId),
+      customerName: req.currentUser?.name || req.headers["x-user-name"] || "Customer",
+      customerEmail: req.currentUser?.email || req.headers["x-user-email"] || "",
+      serviceName: service.serviceName,
+      serviceImage: service.image,
+      serviceCategory: service.category,
+      servicePrice: service.price,
+      appointmentDate,
+      timeSlot: cleanSlot,
+      message: message ? String(message).trim() : "",
+      paymentStatus: "unpaid", // Default
+      status: "pending", // Default
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await appointmentsCollection.insertOne(newAppointment);
+
+    return res.status(201).json({
+      success: true,
+      data: { _id: result.insertedId, ...newAppointment },
+      message: "Appointment request submitted successfully.",
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.post("/appointments", requireCustomer, createAppointmentHandler);
+app.post("/api/appointments", requireCustomer, createAppointmentHandler);
+
+// GET /appointments (or /api/appointments)
+// Query params: customerId, serviceId, status, date
+const getAppointmentsHandler = async (req, res) => {
+  try {
+    const { customerId, serviceId, status, date } = req.query;
+    const query = {};
+
+    const userRole = req.headers["x-user-role"];
+    const userEmail = req.headers["x-user-email"];
+
+    // If caller is customer, lock query to their customerId or email
+    if (userRole !== "admin") {
+      if (userEmail) {
+        const user = await findUser({ email: userEmail });
+        if (user) {
+          query.$or = [{ customerId: String(user._id) }, { customerEmail: user.email }];
+        } else if (customerId) {
+          query.customerId = String(customerId);
+        }
+      } else if (customerId) {
+        query.customerId = String(customerId);
+      }
+    } else {
+      // Admin can filter by customerId if provided
+      if (customerId) query.customerId = String(customerId);
+    }
+
+    if (serviceId) query.serviceId = String(serviceId);
+    if (date) query.appointmentDate = String(date);
+    if (status && status !== "all") query.status = status;
+
+    const appointments = await appointmentsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.json({
+      success: true,
+      count: appointments.length,
+      data: appointments,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/appointments", getAppointmentsHandler);
+app.get("/api/appointments", getAppointmentsHandler);
+
+// GET /appointments/:id (or /api/appointments/:id)
+const getSingleAppointmentHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid appointment ID" });
+    }
+
+    const appointment = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    if (!appointment) {
+      return res.status(404).json({ success: false, error: "Appointment not found." });
+    }
+
+    return res.json({ success: true, data: appointment });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/appointments/:id", getSingleAppointmentHandler);
+app.get("/api/appointments/:id", getSingleAppointmentHandler);
+
+// PATCH /appointments/:id/cancel (or /api/appointments/:id/cancel)
+// Rules:
+// - A customer can cancel only their own pending appointment requests.
+// - Admin can cancel pending or confirmed appointment requests.
+const cancelAppointmentHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid appointment ID" });
+    }
+
+    const appointment = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    if (!appointment) {
+      return res.status(404).json({ success: false, error: "Appointment not found." });
+    }
+
+    if (appointment.status === "cancelled") {
+      return res.status(400).json({ success: false, error: "This appointment is already cancelled." });
+    }
+
+    const userRole = req.headers["x-user-role"];
+    const userEmail = req.headers["x-user-email"];
+
+    if (userRole === "admin") {
+      // Admin can cancel pending or confirmed appointments
+      const updated = await appointmentsCollection.findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: { status: "cancelled", updatedAt: new Date() } },
+        { returnDocument: "after" }
+      );
+      return res.json({
+        success: true,
+        data: updated,
+        message: "Appointment cancelled successfully by admin.",
+      });
+    }
+
+    // Customer cancellation
+    if (!userEmail) {
+      return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+    }
+
+    const user = await findUser({ email: userEmail });
+    if (!user) {
+      return res.status(401).json({ success: false, error: "User not found." });
+    }
+
+    // Ownership check
+    const isOwner =
+      appointment.customerId === String(user._id) ||
+      appointment.customerEmail === user.email;
+
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: You can only cancel your own appointments.",
+      });
+    }
+
+    // Rule: Customer can cancel ONLY pending appointments
+    if (appointment.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        error: "You can only cancel pending appointment requests. Confirmed appointments cannot be cancelled online.",
+      });
+    }
+
+    const updated = await appointmentsCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status: "cancelled", updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    return res.json({
+      success: true,
+      data: updated,
+      message: "Your appointment request has been cancelled successfully.",
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.patch("/appointments/:id/cancel", cancelAppointmentHandler);
+app.patch("/api/appointments/:id/cancel", cancelAppointmentHandler);
+
+// PATCH /appointments/:id/status (or /api/appointments/:id/status) - Admin Only
+// Rule: Admin can confirm or cancel appointment requests.
+const updateAppointmentStatusHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid appointment ID" });
+    }
+
+    const { status } = req.body;
+    if (status !== "confirmed" && status !== "cancelled") {
+      return res.status(400).json({
+        success: false,
+        error: "Status must be 'confirmed' or 'cancelled'.",
+      });
+    }
+
+    const updated = await appointmentsCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ success: false, error: "Appointment not found." });
+    }
+
+    return res.json({
+      success: true,
+      data: updated,
+      message: `Appointment status updated to ${status}.`,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.patch("/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
+app.patch("/api/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
 
 // Start server
 app.listen(port, () => {
