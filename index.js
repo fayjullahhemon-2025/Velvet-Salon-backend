@@ -148,6 +148,62 @@ const getSingleServiceHandler = async (req, res) => {
 app.get("/services/:id", getSingleServiceHandler);
 app.get("/api/services/:id", getSingleServiceHandler);
 
+// POST /services (or /api/services) - Admin Only
+const createServiceHandler = async (req, res) => {
+  try {
+    const { serviceName, category, description, price, duration, image, status } = req.body;
+
+    // Validate required fields
+    if (!serviceName || !serviceName.trim()) {
+      return res.status(400).json({ success: false, error: "Service Name is required." });
+    }
+    if (!category || !category.trim()) {
+      return res.status(400).json({ success: false, error: "Service Category is required." });
+    }
+    if (!description || !description.trim()) {
+      return res.status(400).json({ success: false, error: "Description is required." });
+    }
+    if (!image || !image.trim()) {
+      return res.status(400).json({ success: false, error: "Service image is required." });
+    }
+
+    // Price must be a positive number
+    const numPrice = Number(price);
+    if (isNaN(numPrice) || numPrice <= 0) {
+      return res.status(400).json({ success: false, error: "Price must be a positive number." });
+    }
+
+    // Duration must be a positive number
+    const numDuration = Number(duration);
+    if (isNaN(numDuration) || numDuration <= 0) {
+      return res.status(400).json({ success: false, error: "Duration must be a positive number." });
+    }
+
+    const newService = {
+      serviceName: serviceName.trim(),
+      category: category.trim(),
+      description: description.trim(),
+      price: numPrice,
+      duration: Math.round(numDuration),
+      image: image.trim(),
+      status: status === "inactive" ? "inactive" : "active", // Default: active
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await servicesCollection.insertOne(newService);
+    return res.status(201).json({
+      success: true,
+      data: { _id: result.insertedId, ...newService },
+      message: "Service created successfully.",
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.post("/services", requireAdmin, createServiceHandler);
+app.post("/api/services", requireAdmin, createServiceHandler);
 // Start server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
