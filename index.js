@@ -785,6 +785,143 @@ const updateAppointmentStatusHandler = async (req, res) => {
 app.patch("/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
 app.patch("/api/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
 
+// ==========================================
+// USER PROFILE API (CUSTOMERS & ADMINS)
+// ==========================================
+
+// GET /users/profile (or /api/users/profile)
+const getProfileHandler = async (req, res) => {
+  try {
+    const userEmail = req.headers["x-user-email"];
+    const userId = req.headers["x-user-id"];
+
+    if (!userEmail && !userId) {
+      return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+    }
+
+    let user = null;
+    if (userId && ObjectId.isValid(userId)) {
+      user = await findUser({ _id: new ObjectId(userId) });
+    }
+    if (!user && userEmail) {
+      user = await findUser({ email: userEmail });
+    }
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User account not found." });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({ success: false, error: "Forbidden: Account is suspended." });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        _id: String(user._id),
+        name: user.name || "",
+        email: user.email || "",
+        image: user.image || "",
+        phone: user.phone || "",
+        role: user.role || "customer",
+        isBlocked: Boolean(user.isBlocked),
+        createdAt: user.createdAt,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/users/profile", getProfileHandler);
+app.get("/api/users/profile", getProfileHandler);
+
+// PATCH /users/profile (or /api/users/profile)
+// Rules:
+// 1. Users can update: Name, Profile Image, Other Basic Profile Info (phone).
+// 2. Users must not be able to change their own role or blocked status through profile updates.
+// 3. Users must not be able to update another user's profile.
+const updateProfileHandler = async (req, res) => {
+  try {
+    const userEmail = req.headers["x-user-email"];
+    const userId = req.headers["x-user-id"];
+
+    if (!userEmail && !userId) {
+      return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+    }
+
+    let user = null;
+    if (userId && ObjectId.isValid(userId)) {
+      user = await findUser({ _id: new ObjectId(userId) });
+    }
+    if (!user && userEmail) {
+      user = await findUser({ email: userEmail });
+    }
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User account not found." });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({ success: false, error: "Forbidden: Account is suspended." });
+    }
+
+    const { name, image, phone } = req.body;
+    const updateDoc = { updatedAt: new Date() };
+
+    // Update name if provided
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ success: false, error: "Name cannot be empty." });
+      }
+      updateDoc.name = name.trim();
+    }
+
+    // Update image if provided
+    if (image !== undefined) {
+      updateDoc.image = typeof image === "string" ? image.trim() : "";
+    }
+
+    // Update phone if provided
+    if (phone !== undefined) {
+      updateDoc.phone = typeof phone === "string" ? phone.trim() : "";
+    }
+
+    // Security check: Guardrail strictly prevents role or isBlocked modifications
+    // (Never include req.body.role or req.body.isBlocked)
+
+    // Update in the primary user collection
+    const targetCollection = (await db.collection("user").findOne({ _id: user._id }))
+      ? db.collection("user")
+      : db.collection("users");
+
+    const updated = await targetCollection.findOneAndUpdate(
+      { _id: user._id },
+      { $set: updateDoc },
+      { returnDocument: "after" }
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        _id: String(updated._id),
+        name: updated.name || "",
+        email: updated.email || "",
+        image: updated.image || "",
+        phone: updated.phone || "",
+        role: updated.role || "customer",
+        isBlocked: Boolean(updated.isBlocked),
+      },
+      message: "Profile updated successfully.",
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.patch("/users/profile", updateProfileHandler);
+app.patch("/api/users/profile", updateProfileHandler);
+
 // Start server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
