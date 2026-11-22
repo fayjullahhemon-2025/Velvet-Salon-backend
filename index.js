@@ -922,6 +922,173 @@ const updateProfileHandler = async (req, res) => {
 app.patch("/users/profile", updateProfileHandler);
 app.patch("/api/users/profile", updateProfileHandler);
 
+// ==========================================
+// ADMIN USER MANAGEMENT API
+// ==========================================
+
+// GET /users (or /api/users) - Admin Only
+// Query params: role (default: "customer" or "all"), status ("all" | "active" | "blocked"), search
+const getUsersHandler = async (req, res) => {
+  try {
+    const { role, status, search } = req.query;
+    const query = {};
+
+    if (role && role !== "all") {
+      query.role = role;
+    } else if (!role) {
+      // Default to registered customers
+      query.role = "customer";
+    }
+
+    if (status === "active") {
+      query.isBlocked = { $ne: true };
+    } else if (status === "blocked") {
+      query.isBlocked = true;
+    }
+
+    if (search && search.trim()) {
+      const reg = { $regex: search.trim(), $options: "i" };
+      query.$or = [{ name: reg }, { email: reg }];
+    }
+
+    // Look up in primary collection
+    const targetCollection = (await db.collection("user").countDocuments()) > 0
+      ? db.collection("user")
+      : db.collection("users");
+
+    const users = await targetCollection.find(query).sort({ createdAt: -1 }).toArray();
+
+    // Map and count user appointments
+    const formatted = await Promise.all(
+      users.map(async (u) => {
+        const appointmentCount = await appointmentsCollection.countDocuments({
+          $or: [{ customerId: String(u._id) }, { customerEmail: u.email }],
+        });
+
+        return {
+          _id: String(u._id),
+          name: u.name || "Customer",
+          email: u.email || "",
+          image: u.image || "",
+          phone: u.phone || "",
+          role: u.role || "customer",
+          isBlocked: Boolean(u.isBlocked),
+          createdAt: u.createdAt,
+          totalAppointments: appointmentCount,
+        };
+      })
+    );
+
+    return res.json({
+      success: true,
+      count: formatted.length,
+      data: formatted,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/users", requireAdmin, getUsersHandler);
+app.get("/api/users", requireAdmin, getUsersHandler);
+
+// GET /users/:id (or /api/users/:id) - Admin Only
+const getUserDetailsHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid user ID." });
+    }
+
+    const user = await findUser({ _id: new ObjectId(id) });
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User not found." });
+    }
+
+    const appointmentCount = await appointmentsCollection.countDocuments({
+      $or: [{ customerId: String(user._id) }, { customerEmail: user.email }],
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        _id: String(user._id),
+        name: user.name || "Customer",
+        email: user.email || "",
+        image: user.image || "",
+        phone: user.phone || "",
+        role: user.role || "customer",
+        isBlocked: Boolean(user.isBlocked),
+        createdAt: user.createdAt,
+        totalAppointments: appointmentCount,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/users/:id", requireAdmin, getUserDetailsHandler);
+app.get("/api/users/:id", requireAdmin, getUserDetailsHandler);
+
+// PATCH /users/:id/block (or /api/users/:id/block) - Admin Only
+// Block or Unblock User
+const toggleBlockUserHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid user ID." });
+    }
+
+    const user = await findUser({ _id: new ObjectId(id) });
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User not found." });
+    }
+
+    // Safety guardrail: Admin cannot block themselves
+    const adminEmail = req.headers["x-user-email"];
+    const adminId = req.headers["x-user-id"];
+    if (user.email === adminEmail || String(user._id) === String(adminId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Administrators cannot block their own account.",
+      });
+    }
+
+    const { isBlocked } = req.body;
+    const blockFlag = Boolean(isBlocked);
+
+    const targetCollection = (await db.collection("user").findOne({ _id: user._id }))
+      ? db.collection("user")
+      : db.collection("users");
+
+    const updated = await targetCollection.findOneAndUpdate(
+      { _id: user._id },
+      { $set: { isBlocked: blockFlag, updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        _id: String(updated._id),
+        name: updated.name,
+        email: updated.email,
+        role: updated.role,
+        isBlocked: Boolean(updated.isBlocked),
+      },
+      message: blockFlag
+        ? `Customer "${updated.name}" has been blocked.`
+        : `Customer "${updated.name}" has been unblocked.`,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.patch("/users/:id/block", requireAdmin, toggleBlockUserHandler);
+app.patch("/api/users/:id/block", requireAdmin, toggleBlockUserHandler);
+
 // Start server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
