@@ -28,6 +28,7 @@ const db = connectedDB.db("Velvet-Saloon-DB");
 const servicesCollection = db.collection("services");
 const usersCollection = db.collection("user");
 const appointmentsCollection = db.collection("appointments");
+const transactionsCollection = db.collection("transactions");
 
 // Helper to look up user from either 'user' or 'users' collection
 const findUser = async (query) => {
@@ -1088,6 +1089,48 @@ const toggleBlockUserHandler = async (req, res) => {
 
 app.patch("/users/:id/block", requireAdmin, toggleBlockUserHandler);
 app.patch("/api/users/:id/block", requireAdmin, toggleBlockUserHandler);
+
+// -------------------------------------------------------------
+// TRANSACTIONS ROUTES
+// -------------------------------------------------------------
+const getTransactionsHandler = async (req, res) => {
+  try {
+    const rawTransactions = await transactionsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.json({
+      success: true,
+      data: rawTransactions,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+const getTransactionByIdHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = ObjectId.isValid(id)
+      ? { $or: [{ _id: new ObjectId(id) }, { stripeSessionId: id }] }
+      : { stripeSessionId: id };
+
+    const transaction = await transactionsCollection.findOne(query);
+    if (!transaction) {
+      return res.status(404).json({ success: false, error: "Transaction not found." });
+    }
+
+    return res.json({ success: true, data: transaction });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/transactions", getTransactionsHandler);
+app.get("/api/transactions", getTransactionsHandler);
+app.get("/transactions/:id", getTransactionByIdHandler);
+app.get("/api/transactions/:id", getTransactionByIdHandler);
 
 // Start server
 app.listen(port, () => {
