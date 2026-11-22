@@ -297,6 +297,29 @@ const toggleStatusHandler = async (req, res) => {
 
 app.patch("/services/:id/status", requireAdmin, toggleStatusHandler);
 app.patch("/api/services/:id/status", requireAdmin, toggleStatusHandler);
+
+// DELETE /services/:id (or /api/services/:id) - Admin Only
+const deleteServiceHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid service ID" });
+    }
+
+    const result = await servicesCollection.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ success: false, error: "Service not found." });
+    }
+
+    return res.json({ success: true, message: "Service deleted successfully." });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.delete("/services/:id", requireAdmin, deleteServiceHandler);
+app.delete("/api/services/:id", requireAdmin, deleteServiceHandler);
+
 // Start server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
