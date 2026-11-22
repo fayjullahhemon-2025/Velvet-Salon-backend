@@ -47,6 +47,22 @@ const servicesCollection = db.collection("services");
 const usersCollection = db.collection("user");
 const appointmentsCollection = db.collection("appointments");
 const transactionsCollection = db.collection("transactions");
+const imagesCollection = db.collection("images");
+
+//image get api
+const getImagesHandler = async (req, res) => {
+  try {
+    const images = await imagesCollection.find({}).toArray();
+    return res.json({ success: true, data: images });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.get("/images", getImagesHandler);
+app.get("/iimages", getImagesHandler);
+app.get("/api/images", getImagesHandler);
+app.get("/api/iimages", getImagesHandler);
 
 // Helper to look up user from either 'user' or 'users' collection
 const findUser = async (query) => {
