@@ -727,7 +727,9 @@ app.patch("/api/appointments/:id/cancel", cancelAppointmentHandler);
 
 
 // PATCH /appointments/:id/status (or /api/appointments/:id/status) - Admin Only
-// Rule: Admin can confirm or cancel appointment requests.
+// Rules:
+// - Admin can confirm or cancel appointment requests.
+// - Only pending appointments can be confirmed.
 const updateAppointmentStatusHandler = async (req, res) => {
   try {
     const { id } = req.params;
@@ -743,20 +745,37 @@ const updateAppointmentStatusHandler = async (req, res) => {
       });
     }
 
+    const existing = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    if (!existing) {
+      return res.status(404).json({ success: false, error: "Appointment not found." });
+    }
+
+    // Rule: Only pending appointments can be confirmed
+    if (status === "confirmed" && existing.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        error: `Only pending appointments can be confirmed. Current status is '${existing.status}'.`,
+      });
+    }
+
+    // Rule: Cannot cancel an already cancelled appointment
+    if (status === "cancelled" && existing.status === "cancelled") {
+      return res.status(400).json({
+        success: false,
+        error: "This appointment is already cancelled.",
+      });
+    }
+
     const updated = await appointmentsCollection.findOneAndUpdate(
       { _id: new ObjectId(id) },
       { $set: { status, updatedAt: new Date() } },
       { returnDocument: "after" }
     );
 
-    if (!updated) {
-      return res.status(404).json({ success: false, error: "Appointment not found." });
-    }
-
     return res.json({
       success: true,
       data: updated,
-      message: `Appointment status updated to ${status}.`,
+      message: `Appointment successfully marked as ${status}.`,
     });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
