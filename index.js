@@ -1162,3 +1162,5 @@ app.get("/api/transactions/:id", verifyToken, requireAdmin, getTransactionByIdHa
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
+
+export default app;
