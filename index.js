@@ -723,6 +723,49 @@ const cancelAppointmentHandler = async (req, res) => {
 
 app.patch("/appointments/:id/cancel", cancelAppointmentHandler);
 app.patch("/api/appointments/:id/cancel", cancelAppointmentHandler);
+
+
+
+// PATCH /appointments/:id/status (or /api/appointments/:id/status) - Admin Only
+// Rule: Admin can confirm or cancel appointment requests.
+const updateAppointmentStatusHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: "Invalid appointment ID" });
+    }
+
+    const { status } = req.body;
+    if (status !== "confirmed" && status !== "cancelled") {
+      return res.status(400).json({
+        success: false,
+        error: "Status must be 'confirmed' or 'cancelled'.",
+      });
+    }
+
+    const updated = await appointmentsCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ success: false, error: "Appointment not found." });
+    }
+
+    return res.json({
+      success: true,
+      data: updated,
+      message: `Appointment status updated to ${status}.`,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+app.patch("/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
+app.patch("/api/appointments/:id/status", requireAdmin, updateAppointmentStatusHandler);
+
 // Start server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
