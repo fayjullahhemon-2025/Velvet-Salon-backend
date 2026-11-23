@@ -24,6 +24,26 @@ const verifyToken = async (req, res, next) => {
   try {
     const { payload } = await jwtVerify(token, JWKS);
     req.user = payload;
+
+    // Check if the authenticated user is blocked
+    const userEmail = payload.email;
+    const userId = payload.sub;
+    let liveUser = null;
+    if (userEmail) {
+      liveUser = (await db.collection("user").findOne({ email: userEmail })) ||
+                 (await db.collection("users").findOne({ email: userEmail }));
+    } else if (userId && ObjectId.isValid(userId)) {
+      liveUser = (await db.collection("user").findOne({ _id: new ObjectId(userId) })) ||
+                 (await db.collection("users").findOne({ _id: new ObjectId(userId) }));
+    }
+
+    if (liveUser?.isBlocked || payload.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: Your account has been suspended. Please contact salon administration.",
+      });
+    }
+
     next();
   } catch (error) {
     return res.status(401).json({ success: false, error: error.message });
